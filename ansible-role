@@ -1,0 +1,70 @@
+require 'yaml'
+require 'tempfile'
+
+begin
+  prov = $evm.root['miq_provision']
+  template = prov.source
+  vm = prov.destination
+  #
+  # Check that the VM is booted and has an IP address
+  #
+  if vm.ipaddresses.length.zero?
+    $evm.log(:info, "VM doesnt have an IP address yet - retrying in 1 minute")
+    $evm.root['ae_result'] = 'retry'
+    $evm.root['ae_retry_interval'] = '1.minute'
+    exit MIQ_OK
+  end
+  ip_address = vm.ipaddresses[0]
+  $evm.log(:info, "IP Address is: #{ip_address}")
+  ansiblerole = prov.get_option(:ansiblerole)
+  $evm.log(:info, "Ansible Role is: #{ansiblerole}")
+  #
+  # add host to /etc/ansible/hosts if it doesn't already exist
+  #
+  unless File.foreach('/etc/ansible/hosts').grep(/#{Regexp.escape(ip_address)}/).any?
+    open('/etc/ansible/hosts', 'a') do |f|
+      f.puts "#{ip_address}"
+      f.close
+    end
+  end
+  #
+  # Remove the hosts key if it already exists
+  #
+  cmd = "ssh-keygen -R #{ip_address}"
+  `#{cmd}`
+  #
+  # update the hosts key
+  #
+  cmd = "ssh-keyscan -H #{ip_address} >> \'/root/\.ssh/known_hosts'"
+  `#{cmd}`
+  #
+  # Create a temporary Ansible playbook file
+  #
+  tempfile = Tempfile.new('ansible-')
+
+  playbook = []
+  this_host = {}
+  this_host['hosts'] = []
+  this_host['hosts'] = "#{ip_address}"
+  this_host['tasks'] = []
+  this_host['tasks'] << { 'name'      => 'Set hostname',
+                          'hostname'  => "name=#{vm.name}"
+                        }
+  this_host['tasks'] << { 'name'      => 'touch a file to test',
+                          'command'   => '/usr/bin/touch /tmp/helloworld'
+                        }
+  this_host['roles'] = []
+  this_host['roles'] << { 'name'      => "install #{ansiblerole}",
+                          'role'      => "#{ansiblerole}"
+                        }
+  playbook << this_host
+  #
+  # Write the contents of the playbook
+  #
+  tempfile.write("#{playbook.to_yaml}\n")
+  tempfile.close
+  cmd = "ansible-playbook #{tempfile.path}"
+  $evm.log(:info, "Running ansible-playbook using #{tempfile.path}")
+  ansible_results = `#{cmd}`
+  $evm.log(:info, "Finished ansible-playbook, results: #{ansible_results}")
+end
